@@ -7,6 +7,9 @@ authors = [
     { name = "Daniel Nunes", email = "daniel.msnunes@gmail.com" }
 ]
 requires-python = ">=3.14"
+dependencies = [
+    "roar-net-api>=0.1.1",
+]
 
 [project.scripts]
 salbp1 = "salbp1:main"

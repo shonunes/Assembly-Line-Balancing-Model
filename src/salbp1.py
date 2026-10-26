@@ -3,10 +3,22 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-from typing import TextIO
+from collections.abc import Iterable
+from typing import Self, TextIO
+
+from roar_net_api.operations import (
+    SupportsApplyMove,
+    SupportsConstructionNeighbourhood,
+    SupportsCopySolution,
+    SupportsEmptySolution,
+    SupportsLowerBound,
+    SupportsLowerBoundIncrement,
+    SupportsMoves,
+    SupportsObjectiveValue,
+)
 
 
-class Solution:
+class Solution(SupportsCopySolution, SupportsLowerBound, SupportsObjectiveValue):
     def __init__(
         self,
         problem: Problem,
@@ -35,10 +47,20 @@ class Solution:
 
     def __str__(self) -> str:
         s = f"Station tasks: {self.station_tasks}"
-        s += f"\nRemaining task predecessors: {self.remaining_preds}"
-        s += f"\nRemaining station times: {self.remaining_times}"
-        s += f"\nReady tasks: {self.ready_tasks}"
+        # s += f"\nRemaining task predecessors: {self.remaining_preds}"
+        # s += f"\nRemaining station times: {self.remaining_times}"
+        # s += f"\nReady tasks: {self.ready_tasks}"
         return s
+
+    def copy_solution(self) -> Self:
+        return self.__class__(
+            self.problem,
+            [list(tasks) for tasks in self.station_tasks],
+            list(self.remaining_preds),
+            list(self.remaining_times),
+            list(self.ready_tasks),
+            self.lb,
+        )
 
     def objective_value(self) -> int | None:
         if (
@@ -51,7 +73,82 @@ class Solution:
         return self.lb
 
 
-class Problem:
+class AppendMove(SupportsApplyMove[Solution], SupportsLowerBoundIncrement[Solution]):
+    def __init__(self, task: int) -> None:
+        self.task = task
+        self.inc = None
+
+    def __str__(self) -> str:
+        if self.task == -1:
+            return "Add new station"
+        return f"Append task {self.task}"
+
+    def apply_move(self, solution: Solution) -> Solution:
+        problem = solution.problem
+        if self.task == -1:  # Add new station
+            # Update lower bound
+            solution.lb += self.lower_bound_increment(solution)
+
+            # Update solution
+            solution.station_tasks.append([])
+            solution.remaining_times.append(problem.cycle)
+            return solution
+
+        # Update solution (lower bound increment is 0)
+        solution.station_tasks[-1].append(self.task)
+        solution.remaining_times[-1] -= problem.times[self.task]
+        solution.ready_tasks.remove(self.task)
+        for suc in problem.succ[self.task]:
+            solution.remaining_preds[suc] -= 1
+            assert solution.remaining_preds[suc] >= 0
+            if solution.remaining_preds[suc] == 0:
+                solution.ready_tasks.append(suc)
+        assert solution.remaining_times[-1] >= 0
+        return solution
+
+    def lower_bound_increment(self, solution: Solution) -> float:
+        if self.inc:
+            return self.inc
+
+        if self.task != -1 or len(solution.station_tasks) == 0:
+            return 0
+
+        problem = solution.problem
+        self.inc = solution.remaining_times[-1] / problem.cycle
+        return self.inc
+
+
+class AppendNeighborhood(SupportsMoves[Solution, AppendMove]):
+    def __init__(self, problem: Problem) -> None:
+        self.problem = problem
+
+    def moves(self, solution: Solution) -> Iterable[AppendMove]:
+        assert self.problem == solution.problem
+        if not solution.ready_tasks:
+            return
+
+        if len(solution.station_tasks) == 0:
+            yield AppendMove(-1)
+            return
+
+        assert solution.remaining_times
+        station_time = solution.remaining_times[-1]
+        station_tasks = solution.station_tasks[-1]
+        last_task = -1 if len(station_tasks) == 0 else station_tasks[-1]
+        n_moves = 0
+        for task in solution.ready_tasks:
+            if task >= last_task and self.problem.times[task] <= station_time:
+                n_moves += 1
+                yield AppendMove(task)
+
+        if n_moves == 0:
+            yield AppendMove(-1)
+
+
+class Problem(
+    SupportsConstructionNeighbourhood[AppendNeighborhood],
+    SupportsEmptySolution[Solution],
+):
     def __init__(
         self, cycle: int, times: tuple[int, ...], succ: tuple[tuple[int, ...], ...]
     ) -> None:
@@ -59,6 +156,12 @@ class Problem:
         self.cycle = cycle
         self.times = times
         self.succ = succ
+        self.c_nbhood = None
+
+    def construction_neighbourhood(self) -> AppendNeighborhood:
+        if self.c_nbhood is None:
+            self.c_nbhood = AppendNeighborhood(self)
+        return self.c_nbhood
 
     @classmethod
     def from_textio(cls, f: TextIO) -> Problem:
@@ -140,6 +243,12 @@ def main():
 
     solution = problem.empty_solution()
     print(solution)
+
+    import roar_net_api.algorithms as alg
+
+    beam_solution = alg.beam_search(problem, solution, bw=50)
+    print(beam_solution)
+    print(beam_solution.objective_value())
 
 
 if __name__ == "__main__":
